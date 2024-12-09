@@ -1,5 +1,5 @@
 # Repository for LGC
-Code for paper **"[Revitalizing Reconstruction Models for Multi-class Anomaly Detection via Class-Aware Contrastive Learning](1111)"**.
+Code for paper **"[Revitalizing Reconstruction Models for Multi-class Anomaly Detection via Class-Aware Contrastive Learning](https://arxiv.org/abs/2412.04769)"**.
 
 
 ## 🛠️ Getting Started
@@ -56,6 +56,12 @@ Our benchmark is built on [ADer](https://github.com/zhangzjn/ADer) and [RD4AD](h
 ---
 
 ## Citation
-```angular2html
+``` 
+@article{fan2024revita,
+          title={Revitalizing Reconstruction Models for Multi-class Anomaly Detection via Class-Aware Contrastive Learning},
+          author={Fan, Lei and Huang, Junjie and Di, Donglin and Su, Anyang and Pagnucco, Maurice and Song, Yang},
+          journal={arXiv preprint arXiv:2412.04769},
+          year={2024}
+        }
 
 ```
