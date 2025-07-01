@@ -1,4 +1,10 @@
 # Repository for LGC
+
+
+Our new version **Salvaging the Overlooked: Leveraging Class-Aware Contrastive Learning for Multi-Class Anomaly Detection** has been accepted by ICCV2025. We will update the ArXiv and code once the camera ready version is ready.
+
+
+
 Code for paper **"[Revitalizing Reconstruction Models for Multi-class Anomaly Detection via Class-Aware Contrastive Learning](https://arxiv.org/abs/2412.04769)"**.
 
 
