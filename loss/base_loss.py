@@ -29,23 +29,34 @@ class SCLLoss(nn.Module):
         self.mask = None
         self.last_local_batch_size = None
 
-    def scl_loss(self, feats, feats_grid, labels):
-        feats = torch.cat([feats, feats_grid], dim=0)
-        feats = F.normalize(feats, dim=1)
-        
-        labels = labels.view(-1, 1)
-        labels = torch.cat([labels, labels], dim=0)
-        
-        sim_matrix = torch.mm(feats, feats.T) / self.temperature
-        
-        pos_mask = (labels == labels.T).float()
-        pos_mask.fill_diagonal_(0)
-        scl_loss = -torch.sum(pos_mask * torch.log(torch.exp(sim_matrix) / torch.exp(sim_matrix).sum(dim=-1, keepdim=True))) / pos_mask.sum()
-        
-        return scl_loss
+    def scl_loss(self, feats, labels):
+        # Normalize global features
+        global_features = F.normalize(feats, dim=1)
 
-    def forward(self, x, x_k, labels):
-        return self.loss(x, x_k, labels) * self.lam
+        # Compute similarity matrix
+        similarity_matrix = torch.matmul(global_features, global_features.T) / self.temperature
+
+        # Create positive pairs mask
+        positive_mask = (labels.unsqueeze(1) == labels.unsqueeze(0)).float()
+
+        # Create negative pairs mask (1 - positive_mask)
+        negative_mask = 1.0 - positive_mask
+
+        # Compute log-softmax over the similarity matrix
+        log_prob = F.log_softmax(similarity_matrix, dim=-1)
+
+        # Compute positive loss (maximize similarity for positive pairs)
+        positive_loss = -(positive_mask * log_prob).sum(dim=-1) / (positive_mask.sum(dim=-1) + 1e-6)
+
+        # Compute negative loss (minimize similarity for negative pairs)
+        negative_loss = -(negative_mask * log_prob).sum(dim=-1) / (negative_mask.sum(dim=-1) + 1e-6)
+
+        # Combine positive and negative losses
+        loss = positive_loss.mean() + negative_loss.mean()
+        return loss
+
+    def forward(self, x, labels):
+        return self.loss(x, labels) * self.lam
 
 
 @LOSS.register_module
@@ -58,18 +69,28 @@ class DenseLoss(nn.Module):
 
     def densecl(self, q_b, k_b, q_grid, k_grid, labels):
         # Normalize features
-        q_b = F.normalize(q_b, p=2, dim=1)
-        k_b = F.normalize(k_b, p=2, dim=1)
-        q_grid = F.normalize(q_grid, p=2, dim=1)
-        k_grid = F.normalize(k_grid, p=2, dim=1) 
+        q_b = F.normalize(q_b, p=2, dim=1)  # (b, c, h, w)
+        k_b = F.normalize(k_b, p=2, dim=1)  # (b, c, h, w)
+        q_grid = F.normalize(q_grid, p=2, dim=1)  # (b, c, h, w)
+        k_grid = F.normalize(k_grid, p=2, dim=1)  # (b, c, h*w)
 
         # Flatten the spatial dimensions
-        q_b_flat = q_b.view(q_b.size(0), q_b.size(1), -1) 
-        k_b_flat = k_b.view(k_b.size(0), k_b.size(1), -1) 
-        similarity_matrix = torch.einsum('bci,bcj->bij', q_b_flat, k_b_flat) 
+        q_b_flat = q_b.view(q_b.size(0), q_b.size(1), -1)  # (b, c, h*w)
+        k_b_flat = k_b.view(k_b.size(0), k_b.size(1), -1)  # (b, c, h*w)
+        similarity_matrix = torch.einsum('bci,bcj->bij', q_b_flat, k_b_flat)  # (b, h*w, h*w)
 
         # Get the index of the most similar features between q_b and k_b
         max_sim_idx = torch.argmax(similarity_matrix, dim=-1)  # (b, h*w)
+
+        # k = 3
+        # b, c, h, w = q_b.size()
+        # q_b_flat = q_b.view(b, c, -1).transpose(1, 2)   # (b, h*w, c)
+
+        # k_b_unfold = F.unfold(k_b, kernel_size=3, padding=1)  # (b, c*3*3, h*w)
+        # k_b_unfold = k_b_unfold.view(b, c, 3 * 3, h * w).permute(0, 3, 1, 2)   # (b, h*w, c, 3*3)
+
+        # similarity_local = torch.einsum('bkc,bkci->bki', q_b_flat, k_b_unfold)  # (b, h*w, 9)
+        # max_sim_idx = torch.argmax(similarity_local, dim=-1)  # (b, h*w)
 
         # Flatten q_grid and k_grid for grid-level comparison
         q_grid_flat = q_grid.view(q_grid.size(0), q_grid.size(1), -1)  # (b, c, h*w)
@@ -174,7 +195,8 @@ class CosLoss(nn.Module):
         loss = 0
         for in1, in2 in zip(input1, input2):
             if self.flat:
-                loss += (1 - self.cos_sim(in1.contiguous().view(in1.shape[0], -1), in2.contiguous().view(in2.shape[0], -1))).mean() * self.lam
+                loss += (1 - self.cos_sim(in1.contiguous().view(in1.shape[0], -1),
+                                          in2.contiguous().view(in2.shape[0], -1))).mean() * self.lam
             else:
                 loss += (1 - self.cos_sim(in1.contiguous(), in2.contiguous())).mean() * self.lam
         return loss / len(input1) if self.avg else loss
@@ -297,8 +319,8 @@ class FocalLoss(nn.Module):
 
 
 def gaussian(window_size, sigma):
-    gauss = torch.Tensor([exp(-(x - window_size//2)**2/float(2*sigma**2)) for x in range(window_size)])
-    return gauss/gauss.sum()
+    gauss = torch.Tensor([exp(-(x - window_size // 2) ** 2 / float(2 * sigma ** 2)) for x in range(window_size)])
+    return gauss / gauss.sum()
 
 
 def create_window(window_size, channel=1):
@@ -323,7 +345,7 @@ def ssim(img1, img2, window_size=11, window=None, size_average=True, full=False,
     else:
         l = val_range
 
-    padd = window_size//2
+    padd = window_size // 2
     (_, channel, height, width) = img1.size()
     if window is None:
         real_size = min(window_size, height, width)
@@ -372,6 +394,7 @@ class SSIMLoss(torch.nn.Module):
         self.window = create_window(window_size).cuda()
 
         self.lam = lam
+
     def forward(self, img1, img2):
         (_, channel, _, _) = img1.size()
 
@@ -382,9 +405,11 @@ class SSIMLoss(torch.nn.Module):
             self.window = window
             self.channel = channel
 
-        s_score, ssim_map = ssim(img1, img2, window=window, window_size=self.window_size, size_average=self.size_average)
+        s_score, ssim_map = ssim(img1, img2, window=window, window_size=self.window_size,
+                                 size_average=self.size_average)
         loss = (1.0 - s_score) * self.lam
         return loss
+
 
 @LOSS.register_module
 class FFTLoss(nn.Module):
@@ -424,6 +449,7 @@ class CSUMLoss(nn.Module):
             loss += torch.sum(instance) / (h * w) * self.lam
         return loss
 
+
 @LOSS.register_module
 class FFocalLoss(nn.Module):
     def __init__(self, lam=1, alpha=-1, gamma=4, reduction="mean"):
@@ -438,18 +464,19 @@ class FFocalLoss(nn.Module):
         targets = targets.float()
         ce_loss = F.binary_cross_entropy(inputs, targets, reduction="none")
         p_t = inputs * targets + (1 - inputs) * (1 - targets)
-        loss = ce_loss * ((1 - p_t) **  self.gamma)
+        loss = ce_loss * ((1 - p_t) ** self.gamma)
 
-        if  self.alpha >= 0:
-            alpha_t =  self.alpha * targets + (1 -  self.alpha) * (1 - targets)
+        if self.alpha >= 0:
+            alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
             loss = alpha_t * loss
 
-        if  self.reduction == "mean":
+        if self.reduction == "mean":
             loss = loss.mean() * self.lam
-        elif  self.reduction == "sum":
+        elif self.reduction == "sum":
             loss = loss.sum() * self.lam
 
         return loss
+
 
 @LOSS.register_module
 class SegmentCELoss(nn.Module):
@@ -459,7 +486,7 @@ class SegmentCELoss(nn.Module):
         self.weight = weight
 
     def forward(self, mask, pred):
-        bsz,_,h,w=pred.size()
+        bsz, _, h, w = pred.size()
         pred = pred.view(bsz, 2, -1)
         mask = mask.view(bsz, -1).long()
-        return self.criterion(pred,mask)
+        return self.criterion(pred, mask)

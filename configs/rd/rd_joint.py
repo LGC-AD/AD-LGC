@@ -6,19 +6,19 @@ import torchvision.transforms.functional as F
 from configs.__base__ import *
 
 
-class cfg(cfg_common, cfg_dataset_default, cfg_model_lgc):
+class cfg(cfg_common, cfg_dataset_default, cfg_model_rd):
 
     def __init__(self):
         # super(cfg, self).__init__()
         cfg_common.__init__(self)
         cfg_dataset_default.__init__(self)
-        cfg_model_lgc.__init__(self)
+        cfg_model_rd.__init__(self)
 
         self.fvcore_b = 1
         self.fvcore_c = 3
         self.seed = 42
         self.size = 256
-        self.epoch_full = 200
+        self.epoch_full = 100
         self.warmup_epochs = 0
         self.test_start_epoch = self.epoch_full
         self.test_per_epoch = self.epoch_full // 10
@@ -35,22 +35,16 @@ class cfg(cfg_common, cfg_dataset_default, cfg_model_lgc):
         self.lambda_1 = 1
         self.lambda_2 = 1
         self.vis = False
-        
 
         # ==> data
-        # self.data.type = 'UnifiedAD'
-        self.data.type = 'DefaultAD'
-        self.data.root = '/mnt/pfs-mc0p4k/tts/team/digital_avatar_group/hjj/hjj/data/MVTec_AD'
-        # self.data.root = r'/mnt/lpai-dione/ssai/cvg/team/share_datasets/MVTec_AD'
-        # self.data.root = r'/media/huzhiguang/Work/WorkSpace/Project/Python/Dataset/General/AD/MVTec AD'
-        # self.data.root = [
-        #     '/mnt/pfs-mc0p4k/tts/team/digital_avatar_group/hjj/hjj/data/BTech_Dataset_Transformed',
-        #     '/mnt/pfs-mc0p4k/tts/team/digital_avatar_group/hjj/hjj/data/MVTec_AD',
-        #     '/mnt/pfs-mc0p4k/tts/team/digital_avatar_group/hjj/hjj/data/VisA',
-        #     # '/mnt/pfs-mc0p4k/tts/team/digital_avatar_group/hjj/hjj/data/realiad_512'
-        # ]
-        self.data.anomaly_source_path = '/mnt/pfs-mc0p4k/cvg/team/hjj/code/diffusionad/data/dtd/images'
-        # self.data.anomaly_source_path = '/mnt/pfs-mc0p4k/tts/team/digital_avatar_group/hjj/hjj/data/dtd/images'
+        self.data.type = 'UnifiedAD'
+        self.data.root = [
+            'data/btad',
+            'data/visa',
+            'data/mvtec',
+            'data/realiad_512'
+        ]
+        self.data.anomaly_source_path = ''
         self.data.meta = 'meta.json'
         self.data.resize_shape = [self.size, self.size]
         self.data.cls_names = []
@@ -81,7 +75,6 @@ class cfg(cfg_common, cfg_dataset_default, cfg_model_lgc):
         ]
 
         # ==> modal
-        # checkpoint_path = '/media/huzhiguang/Work/WorkSpace/Project/Python/HJJ/code/ader/runs/RDADTrainer_configs_rdad_rd_256_100e_20241113-173245/net_40.pth'
         checkpoint_path = ''
         self.model_t = Namespace()
         self.model_t.name = 'timm_wide_resnet50_2'
@@ -91,9 +84,9 @@ class cfg(cfg_common, cfg_dataset_default, cfg_model_lgc):
         self.model_s.name = 'de_wide_resnet50_2'
         self.model_s.kwargs = dict(pretrained=False, checkpoint_path='', strict=False)
         self.model = Namespace()
-        self.model.name = 'lgc'
+        self.model.name = 'rd_lgc'
         self.model.kwargs = dict(pretrained=False, checkpoint_path=checkpoint_path, strict=True, model_t=self.model_t,
-                                 model_s=self.model_s)
+                                 model_s=self.model_s, dp=False)
 
         # ==> evaluator
         self.evaluator.kwargs = dict(metrics=self.metrics, pooling_ks=None, max_step_aupro=100,
@@ -107,7 +100,7 @@ class cfg(cfg_common, cfg_dataset_default, cfg_model_lgc):
         self.optim.distill_opt.kwargs = dict(name='adam', betas=(0.5, 0.999))
 
         # ==> trainer
-        self.trainer.name = 'LGCTrainer'
+        self.trainer.name = 'RDLGCTrainer'
         self.trainer.logdir_sub = ''
         self.trainer.resume_dir = ''
         self.trainer.epoch_full = self.epoch_full
@@ -141,10 +134,8 @@ class cfg(cfg_common, cfg_dataset_default, cfg_model_lgc):
             dict(name='cos', suffixes=[''], fmt=':>5.3f', add_name='avg'),
             dict(name='glb', suffixes=[''], fmt=':>5.3f', add_name='avg'),
             dict(name='dense', suffixes=[''], fmt=':>5.3f', add_name='avg'),
-            dict(name='acl', suffixes=[''], fmt=':>5.3f', add_name='avg'),
         ]
         self.logging.log_terms_test = [
             dict(name='batch_t', fmt=':>5.3f', add_name='avg'),
             dict(name='cos', suffixes=[''], fmt=':>5.3f', add_name='avg'),
-            dict(name='glb', suffixes=[''], fmt=':>5.3f', add_name='avg'),
         ]

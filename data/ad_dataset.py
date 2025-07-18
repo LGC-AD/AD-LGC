@@ -29,7 +29,6 @@ from data.noise import Simplex_CLASS
 from data.utils import get_transforms
 from perlin_numpy import generate_perlin_noise_2d
 
-
 # data
 # ├── mvtec
 #     ├── meta.json
@@ -45,6 +44,77 @@ from perlin_numpy import generate_perlin_noise_2d
 #         └── ground_truth
 #             ├── anomaly1
 #                 ├── 000.png
+domain_nums = {
+    'electronics': 450,
+    'mechanics': 450,
+    'grain': 1250,
+    'groceries': 0,
+    'medicine': 550
+}
+
+
+@DATA.register_module
+class MANTA(data.Dataset):
+    def __init__(self, cfg, train=True, transform=None, target_transform=None):
+        self.root = cfg.data.root
+        self.train = train
+        self.transform = transform
+        self.target_transform = target_transform
+        self.loader = get_img_loader(cfg.data.loader_type)
+        self.loader_target = get_img_loader(cfg.data.loader_type_target)
+        self.reshape_size = cfg.data.resize_shape
+        self.data_all = []
+
+        name = self.root.split('/')[-1]
+        meta_info = json.load(open(f'{self.root}/{cfg.data.meta}', 'r'))
+        meta_info = meta_info['train' if self.train else 'test-pixel']
+        self.cls_names = cfg.data.cls_names
+        if not isinstance(self.cls_names, list):
+            self.cls_names = [self.cls_names]
+        self.cls_names = list(meta_info.keys()) if len(self.cls_names) == 0 else self.cls_name
+
+        for cls_name in self.cls_names:
+            self.data_all.extend(meta_info[cls_name])
+        random.shuffle(self.data_all) if self.train else None
+        self.length = len(self.data_all)
+        self.cls2idx = {cls_name: i for i, cls_name in enumerate(self.cls_names)}
+        print(self.cls_names)
+
+    def __len__(self):
+        return self.length
+
+    def __getitem__(self, index):
+        data = self.data_all[index]
+        img_path, mask_path, cls_name, specie_name, anomaly = data['img_path'], data['mask_path'], data['cls_name'], \
+            data['specie_name'], data['anomaly']
+        img_path = f'{self.root}/{img_path}'
+        img = self.loader(img_path)
+        if anomaly == 0:
+            img_mask = Image.fromarray(np.zeros((img.size[0], img.size[1])), mode='L')
+        else:
+            img_mask = np.array(self.loader_target(f'{self.root}/{mask_path}')) > 0
+            img_mask = Image.fromarray(img_mask.astype(np.uint8) * 255, mode='L')
+        img = np.array(img)
+        mask = np.array(img_mask)
+        w = img.shape[1]
+        per_w = int(w / 5)
+
+        img_list = []
+        mask_list = []
+        for i in range(5):
+            image = img[:, i * per_w:(i + 1) * per_w, :]
+            img_mask = mask[:, i * per_w:(i + 1) * per_w]
+            image = Image.fromarray(image).convert('RGB')
+            img_mask = Image.fromarray(img_mask.astype(np.uint8) * 255, mode='L')
+            image = self.transform(image) if self.transform is not None else image
+            img_mask = self.target_transform(
+                img_mask) if self.target_transform is not None and img_mask is not None else img_mask
+            img_list.append(image)
+            mask_list.append(img_mask)
+
+        return {'img': img_list, 'img_mask': mask_list, 'cls_name': cls_name, 'anomaly': anomaly, 'img_path': img_path,
+                'label': int(self.cls2idx[cls_name]), 'height': self.reshape_size[0], 'width': self.reshape_size[1]}
+
 
 @DATA.register_module
 class DefaultAD(data.Dataset):
@@ -61,7 +131,7 @@ class DefaultAD(data.Dataset):
         self.data_all = []
         name = self.root.split('/')[-1]
         if name in ['mvtec', 'coco', 'visa', 'medical', 'btad', 'mpdd', 'mad_sim', 'mad_real',
-                    'MVTec_AD', 'Uni_medical', 'VisA', 'BTech_Dataset_Transformed', 'MVTec AD']:
+                    'MVTec_AD', 'Uni_medical', 'VisA', 'BTech_Dataset_Transformed']:
             meta_info = json.load(open(f'{self.root}/{cfg.data.meta}', 'r'))
             meta_info = meta_info['train' if self.train else 'test']
             self.cls_names = cfg.data.cls_names
@@ -115,9 +185,16 @@ class DefaultAD(data.Dataset):
                             anomaly=1,
                         )
                     data_cls_all.append(info_img)
+                meta_info[cls_name] = data_cls_all
 
         for cls_name in self.cls_names:
-            self.data_all.extend(meta_info[cls_name])
+            if self.train and name in ['visa', 'VisA']:
+                data_list = meta_info[cls_name]
+                n = max(1, int(len(data_list) * 0.01))
+                sampled = random.sample(data_list, n)
+                self.data_all.extend(sampled)
+            else:
+                self.data_all.extend(meta_info[cls_name])
         random.shuffle(self.data_all) if self.train else None
         self.length = len(self.data_all)
         self.cls2idx = {cls_name: i for i, cls_name in enumerate(self.cls_names)}
@@ -189,7 +266,7 @@ class UnifiedAD(data.Dataset):
                 if not isinstance(self.cls_names, list):
                     self.cls_names = [self.cls_names]
                 self.cls_names = list(meta_info.keys()) if len(self.cls_names) == 0 else self.cls_names
-            elif name in ['realiad', 'realiad_512']:
+            elif name in ['realiad', 'realiad_512', 'realiad_256']:
                 cls_names = os.listdir(root)
                 real_cls_names = []
                 for cls_name in cls_names:
@@ -228,48 +305,9 @@ class UnifiedAD(data.Dataset):
         self.length = len(self.data_all)
         self.cls2idx = {cls_name: i for i, cls_name in enumerate(self.cls_names)}
         print(self.cls_names)
-        # self.label_dict = self.get_label_dict() if self.train else None
 
     def __len__(self):
         return self.length
-
-    def get_label_dict(self):
-        import torchvision.models as models
-        from sklearn.cluster import KMeans
-
-        model = models.resnet18(pretrained=False).cuda()
-        model.load_state_dict(
-            torch.load('/mnt/pfs-mc0p4k/tts/team/digital_avatar_group/hjj/hjj/code/ader/ckpts/resnet18-5c106cde.pth'))
-        model = torch.nn.Sequential(*list(model.children())[:-1])  # 去除最后一层
-        model.eval()
-        preprocess = transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(256),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ])
-        label_dict = {}
-        feats = []
-        image_paths = []
-        for meta in self.data_all:
-            img_path = meta['img_path']
-            img = self.loader(img_path)
-            img = preprocess(img)
-            img = img.unsqueeze(0).cuda()
-            with torch.no_grad():
-                feat = model(img)
-                feats.append(feat.squeeze().flatten().cpu().numpy())
-                image_paths.append(img_path)
-
-        feats = np.array(feats)
-        n_clusters = 15
-        kmeans = KMeans(n_clusters=n_clusters, random_state=0)
-        labels = kmeans.fit_predict(feats)
-
-        for img_path, label in zip(image_paths, labels):
-            label_dict[img_path] = label
-
-        return label_dict
 
     def __getitem__(self, index):
         data = self.data_all[index]
@@ -758,7 +796,14 @@ class UnifiedDraem(data.Dataset):
                         data['img_path'] = f"{root}/{data['img_path']}"
                         data['mask_path'] = f"{root}/{data['mask_path']}" if data['anomaly'] else ''
                 for cls_name in cls_names:
-                    self.data_all.extend(meta_info[cls_name])
+                    # 针对 visa 数据集，训练时只抽取 1% 数据
+                    if self.train and name in ['visa', 'VisA']:
+                        data_list = meta_info[cls_name]
+                        n = max(1, int(len(data_list) * 0.01))
+                        sampled = random.sample(data_list, n)
+                        self.data_all.extend(sampled)
+                    else:
+                        self.data_all.extend(meta_info[cls_name])
 
             elif name in ['mvtec3d', 'mvtec_loco']:
                 meta_info = json.load(open(f'{root}/{cfg.data.meta}', 'r'))
@@ -803,7 +848,13 @@ class UnifiedDraem(data.Dataset):
                                 anomaly=1,
                             )
                         data_cls_all.append(info_img)
-                    meta_info[cls_name] = data_cls_all
+                    # 针对 realiad 数据集，训练时只抽取 1% 数据
+                    if self.train:
+                        n = max(1, int(len(data_cls_all) * 0.01))
+                        sampled = random.sample(data_cls_all, n)
+                        meta_info[cls_name] = sampled
+                    else:
+                        meta_info[cls_name] = data_cls_all
                 for cls_name in real_cls_names:
                     self.data_all.extend(meta_info[cls_name])
 
@@ -971,8 +1022,7 @@ class Draem(data.Dataset):
 
         self.data_all = []
         name = self.root.split('/')[-1]
-        if name in ['mvtec', 'coco', 'visa', 'medical', 'btad', 'mpdd', 'mad_sim', 'mad_real', 'MVTec AD',
-                    'VisA', 'Uni_medical', 'BTech_Dataset_Transformed', 'BTAD']:
+        if name in ['mvtec', 'coco', 'visa', 'medical', 'btad', 'mpdd', 'mad_sim', 'mad_real', 'MVTec AD']:
             meta_info = json.load(open(f'{self.root}/{cfg.data.meta}', 'r'))
             meta_info = meta_info['train' if self.train else 'test']
             self.cls_names = cfg.data.cls_names
@@ -1193,7 +1243,14 @@ class UnifiedDeSTSeg(data.Dataset):
                         data['img_path'] = f"{root}/{data['img_path']}"
                         data['mask_path'] = f"{root}/{data['mask_path']}" if data['anomaly'] else ''
                 for cls_name in cls_names:
-                    self.data_all.extend(meta_info[cls_name])
+                    # 针对 visa 数据集，训练时只抽取 1% 数据
+                    if self.train and name in ['visa', 'VisA']:
+                        data_list = meta_info[cls_name]
+                        n = max(1, int(len(data_list) * 0.01))
+                        sampled = random.sample(data_list, n)
+                        self.data_all.extend(sampled)
+                    else:
+                        self.data_all.extend(meta_info[cls_name])
             elif name in ['mvtec3d', 'mvtec_loco']:
                 meta_info = json.load(open(f'{self.root}/{cfg.data.meta}', 'r'))
                 if self.train:
@@ -1237,7 +1294,13 @@ class UnifiedDeSTSeg(data.Dataset):
                                 anomaly=1,
                             )
                         data_cls_all.append(info_img)
-                    meta_info[cls_name] = data_cls_all
+                    # 针对 realiad 数据集，训练时只抽取 1% 数据
+                    if self.train:
+                        n = max(1, int(len(data_cls_all) * 0.01))
+                        sampled = random.sample(data_cls_all, n)
+                        meta_info[cls_name] = sampled
+                    else:
+                        meta_info[cls_name] = data_cls_all
                 for cls_name in real_cls_names:
                     self.data_all.extend(meta_info[cls_name])
 

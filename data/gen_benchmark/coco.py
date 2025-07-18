@@ -100,5 +100,5 @@ class COCOSolver(object):
 
 if __name__ == '__main__':
     for i in range(0, 4):
-        runner = COCOSolver(root='data/coco', ano_num=20, split_idx=i)
-        # runner.run()
+        runner = COCOSolver(root='/mnt/pfs-mc0p4k/cvg/team/hjj/coco', ano_num=20, split_idx=i)
+        runner.run()

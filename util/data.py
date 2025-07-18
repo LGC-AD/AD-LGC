@@ -11,7 +11,7 @@ import torchvision.transforms as transforms
 from skimage import color
 
 
-def wait_for_path(path, check_interval=1, timeout=600):
+def wait_for_path(path, check_interval=1, timeout=5):
     start_time = time.time()
     while not os.path.exists(path):
         elapsed_time = time.time() - start_time

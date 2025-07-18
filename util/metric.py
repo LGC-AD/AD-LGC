@@ -53,7 +53,7 @@ class Evaluator(object):
         self.beta = 1.0
 
         self.boundary = 1e-7
-        self.use_adeval = use_adeval
+        self.use_adeval = True
 
     def run(self, results, cls_name, logger=None):
         idxes = results['cls_names'] == cls_name

@@ -31,14 +31,7 @@ def vis_rgb_gt_amp(img_paths, imgs, img_masks, anomaly_maps, method, root_out, d
         img_rec = img * std[:, None, None] + mean[:, None, None]
         # RGB image
         img_rec = Image.fromarray((img_rec * 255).type(torch.uint8).cpu().numpy().transpose(1, 2, 0))
-        img_rec_np = np.array(img_rec)
-        img_mask = (img_mask * 255).astype(np.uint8).transpose(1, 2, 0)
-        edges = cv2.Canny(img_mask, threshold1=100, threshold2=200)
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(img_rec_np, contours, -1, (255, 0, 0), 2)  # 红色线条，2像素宽
-        img_rec_with_edges = Image.fromarray(img_rec_np)
-        img_rec_with_edges.save(img_path)
-
+        img_rec.save(img_path)
         # RGB image with anomaly map
         anomaly_map = anomaly_map / anomaly_map.max()
         anomaly_map = cm.jet(anomaly_map)
@@ -47,6 +40,9 @@ def vis_rgb_gt_amp(img_paths, imgs, img_masks, anomaly_maps, method, root_out, d
         anomaly_map = Image.fromarray(anomaly_map)
         img_rec_anomaly_map = Image.blend(img_rec, anomaly_map, alpha=0.4)
         img_rec_anomaly_map.save(img_ano_path)
+        # mask
+        img_mask = Image.fromarray((img_mask * 255).astype(np.uint8).transpose(1, 2, 0).repeat(3, axis=2))
+        img_mask.save(mask_path)
 
 
 def save_vis_rgb(save_path, img_path, imgs, save_name):
@@ -81,9 +77,9 @@ def save_data(save_path, cls_name, img_path, imgs_mask, anomaly_map, anomaly):
         if not os.path.exists(anomaly_path):
             os.makedirs(anomaly_path)
 
-        np.save(os.path.join(mask_path, f'{defect_name}_{img_name}_{i}.npy'), imgs_mask[i])
-        np.save(os.path.join(map_path, f'{defect_name}_{img_name}_{i}.npy'), anomaly_map[i])
-        np.save(os.path.join(anomaly_path, f'{defect_name}_{img_name}_{i}.npy'), anomaly[i])
+        np.save(os.path.join(mask_path, f'{defect_name}_{img_name}.npy'), imgs_mask[i])
+        np.save(os.path.join(map_path, f'{defect_name}_{img_name}.npy'), anomaly_map[i])
+        np.save(os.path.join(anomaly_path, f'{defect_name}_{img_name}.npy'), anomaly[i])
 
 def read_data(save_path, cls_name):
     class_path = os.path.join(save_path, cls_name)

@@ -33,72 +33,90 @@ from timm.utils import dispatch_clip_grad
 from ._base_trainer import BaseTrainer
 from . import TRAINER
 from util.vis import vis_rgb_gt_amp, read_data, save_data
-import torch.nn.functional as F
-import pandas as pd
-from sklearn.manifold import TSNE
-from sklearn.cluster import KMeans
-from sklearn.metrics import v_measure_score
 
 
 @TRAINER.register_module
-class LGCTrainer(BaseTrainer):
+class MAMBAADTrainer(BaseTrainer):
     def __init__(self, cfg):
-        super(LGCTrainer, self).__init__(cfg)
-        self.optim.proj_opt = get_optim(cfg.optim.proj_opt.kwargs, self.net.proj_layer, lr=cfg.optim.lr)
-        proj_layer = self.net.proj_layer
-        self.net.proj_layer = None
-        self.optim.distill_opt = get_optim(cfg.optim.distill_opt.kwargs, self.net, lr=cfg.optim.lr * 5)
-        self.net.proj_layer = proj_layer
+        super(MAMBAADTrainer, self).__init__(cfg)
 
     def set_input(self, inputs):
         self.imgs = inputs['img'].cuda()
-        self.aug_imgs = inputs.get('aug_img', None)
         self.imgs_mask = inputs['img_mask'].cuda()
         self.cls_name = inputs['cls_name']
         self.anomaly = inputs['anomaly']
         self.img_path = inputs['img_path']
-        self.labels = inputs['label'].cuda()
         self.bs = self.imgs.shape[0]
-        if self.aug_imgs is not None:
-            self.aug_imgs = self.aug_imgs.cuda()
+
 
     def forward(self):
-        self.feats_t, self.feats_s, self.feats_t_k, self.feats_t_q_grid, self.feats_t_k_grid, self.glb_feats, self.glb_feats_k = self.net(
-            self.imgs, self.aug_imgs)
-
-    def backward_term(self, loss_term, optim):
-        optim.proj_opt.zero_grad()
-        optim.distill_opt.zero_grad()
-        if self.loss_scaler:
-            self.loss_scaler(loss_term, optim, clip_grad=self.cfg.loss.clip_grad, parameters=self.net.parameters(),
-                             create_graph=self.cfg.loss.create_graph)
-        else:
-            loss_term.backward(retain_graph=self.cfg.loss.retain_graph)
-            if self.cfg.loss.clip_grad is not None:
-                dispatch_clip_grad(self.net.parameters(), value=self.cfg.loss.clip_grad)
-
-            optim.proj_opt.step()
-            optim.distill_opt.step()
+        self.feats_t, self.feats_s = self.net(self.imgs)
 
     def optimize_parameters(self):
         if self.mixup_fn is not None:
             self.imgs, _ = self.mixup_fn(self.imgs, torch.ones(self.imgs.shape[0], device=self.imgs.device))
         with self.amp_autocast():
             self.forward()
-
-            loss_cos = self.loss_terms['cos'](self.feats_t, self.feats_s)
-            loss_glb = self.loss_terms['scl'](self.glb_feats, self.glb_feats_k, self.labels)
-            loss_den = self.loss_terms['dense'](self.feats_t, self.feats_t_k, self.feats_t_q_grid, self.feats_t_k_grid,
-                                                self.labels)
-            loss = loss_cos + self.cfg.lambda_1 * loss_glb + self.cfg.lambda_2 * loss_den
-
-        self.backward_term(loss, self.optim)
-        update_log_term(self.log_terms.get('cos'), reduce_tensor(loss_cos, self.world_size).clone().detach().item(), 1,
+            loss_mse = self.loss_terms['pixel'](self.feats_t, self.feats_s)
+        self.backward_term(loss_mse, self.optim)
+        update_log_term(self.log_terms.get('pixel'), reduce_tensor(loss_mse, self.world_size).clone().detach().item(), 1,
                         self.master)
-        update_log_term(self.log_terms.get('glb'), reduce_tensor(loss_glb, self.world_size).clone().detach().item(), 1,
-                        self.master)
-        update_log_term(self.log_terms.get('dense'), reduce_tensor(loss_den, self.world_size).clone().detach().item(),
-                        1, self.master)
+
+    # def train(self):
+    #     self.reset(isTrain=True)
+    #     self.train_loader.sampler.set_epoch(int(self.epoch)) if self.cfg.dist else None
+    #     train_length = self.cfg.data.train_size
+    #     train_loader = iter(self.train_loader)
+    #     while self.epoch < self.epoch_full and self.iter < self.iter_full:
+    #         self.scheduler_step(self.iter)
+    #         # ---------- data ----------
+    #         t1 = get_timepc()
+    #         self.iter += 1
+    #         train_data = next(train_loader)
+    #         self.set_input(train_data)
+    #         t2 = get_timepc()
+    #         update_log_term(self.log_terms.get('data_t'), t2 - t1, 1, self.master)
+    #         # ---------- optimization ----------
+    #         self.optimize_parameters()
+    #         t3 = get_timepc()
+    #         update_log_term(self.log_terms.get('optim_t'), t3 - t2, 1, self.master)
+    #         update_log_term(self.log_terms.get('batch_t'), t3 - t1, 1, self.master)
+    #         self.cfg.total_time = get_timepc() - self.cfg.task_start_time
+    #         self.save_checkpoint()
+    #         break
+    #         # ---------- log ----------
+    #         if self.master:
+    #             if self.iter % self.cfg.logging.train_log_per == 0:
+    #                 msg = able(self.progress.get_msg(self.iter, self.iter_full, self.iter / train_length,
+    #                                                  self.iter_full / train_length), self.master, None)
+    #                 log_msg(self.logger, msg)
+    #                 if self.writer:
+    #                     for k, v in self.log_terms.items():
+    #                         self.writer.add_scalar(f'Train/{k}', v.val, self.iter)
+    #                     self.writer.flush()
+    #         if self.iter % self.cfg.logging.train_reset_log_per == 0:
+    #             self.reset(isTrain=True)
+    #         # ---------- update train_loader ----------
+    #         if self.iter % train_length == 0:
+    #             self.epoch += 1
+    #             if self.cfg.dist and self.dist_BN != '':
+    #                 distribute_bn(self.net, self.world_size, self.dist_BN)
+    #             self.optim.sync_lookahead() if hasattr(self.optim, 'sync_lookahead') else None
+    #             if self.epoch >= self.cfg.trainer.test_start_epoch or self.epoch % self.cfg.trainer.test_per_epoch == 0:
+    #                 self.test()
+    #             else:
+    #                 self.test_ghost()
+    #             self.cfg.total_time = get_timepc() - self.cfg.task_start_time
+    #             total_time_str = str(datetime.timedelta(seconds=int(self.cfg.total_time)))
+    #             eta_time_str = str(
+    #                 datetime.timedelta(seconds=int(self.cfg.total_time / self.epoch * (self.epoch_full - self.epoch))))
+    #             log_msg(self.logger,
+    #                     f'==> Total time: {total_time_str}\t Eta: {eta_time_str} \tLogged in \'{self.cfg.logdir}\'')
+    #             self.save_checkpoint()
+    #             self.reset(isTrain=True)
+    #             self.train_loader.sampler.set_epoch(int(self.epoch)) if self.cfg.dist else None
+    #             train_loader = iter(self.train_loader)
+    #     self._finish()
 
     @torch.no_grad()
     def test(self):
@@ -107,12 +125,10 @@ class LGCTrainer(BaseTrainer):
                 shutil.rmtree(self.tmp_dir)
             os.makedirs(self.tmp_dir, exist_ok=True)
         self.reset(isTrain=False)
-        imgs_masks, anomaly_maps, cls_names, anomalys = [], [], [], []
+        imgs_masks, anomaly_maps, cls_names, anomalys, sample_anomalys, sample_predicts = [], [], [], [], [], []
         batch_idx = 0
         test_length = self.cfg.data.test_size
         test_loader = iter(self.test_loader)
-        glb_feats = []
-        labels = []
         while batch_idx < test_length:
             # if batch_idx == 10:
             # 	break
@@ -121,13 +137,14 @@ class LGCTrainer(BaseTrainer):
             test_data = next(test_loader)
             self.set_input(test_data)
             self.forward()
-            loss_cos = self.loss_terms['cos'](self.feats_t, self.feats_s)
-            update_log_term(self.log_terms.get('cos'), reduce_tensor(loss_cos, self.world_size).clone().detach().item(),
+            loss_mse = self.loss_terms['pixel'](self.feats_t, self.feats_s)
+            update_log_term(self.log_terms.get('pixel'), reduce_tensor(loss_mse, self.world_size).clone().detach().item(),
                             1, self.master)
             # get anomaly maps
             anomaly_map, _ = self.evaluator.cal_anomaly_map(self.feats_t, self.feats_s,
                                                             [self.imgs.shape[2], self.imgs.shape[3]], uni_am=False,
                                                             amap_mode='add', gaussian_sigma=4)
+            # self.imgs_mask[self.imgs_mask > 0.], self.imgs_mask[self.imgs_mask <= 0.] = 1, 0
             self.imgs_mask[self.imgs_mask > 0.5], self.imgs_mask[self.imgs_mask <= 0.5] = 1, 0
             if self.cfg.vis:
                 if self.cfg.vis_dir is not None:
@@ -135,7 +152,7 @@ class LGCTrainer(BaseTrainer):
                 else:
                     root_out = self.writer.logdir
                 vis_rgb_gt_amp(self.img_path, self.imgs, self.imgs_mask.cpu().numpy().astype(int), anomaly_map,
-                               self.cfg.model.name, root_out, 'dataset')
+                               self.cfg.model.name, root_out, self.cfg.data.root.split('/')[1])
             save_path = os.path.join(self.cfg.logdir, 'results')
             save_data(save_path, self.cls_name, self.img_path, self.imgs_mask.cpu().numpy().astype(int), anomaly_map,
                       self.anomaly.cpu().numpy().astype(int))
@@ -152,32 +169,32 @@ class LGCTrainer(BaseTrainer):
                 if batch_idx % self.cfg.logging.test_log_per == 0 or batch_idx == test_length:
                     msg = able(self.progress.get_msg(batch_idx, test_length, 0, 0, prefix=f'Test'), self.master, None)
                     log_msg(self.logger, msg)
-        # self.writer.add_embedding(torch.cat(glb_feats, dim=0), metadata=torch.cat(labels, dim=0), global_step=self.epoch)
-        # merge results
-        # if self.cfg.dist:
-        #     results = dict(imgs_masks=imgs_masks, anomaly_maps=anomaly_maps, cls_names=cls_names, anomalys=anomalys)
-        #     torch.save(results, f'{self.tmp_dir}/{self.rank}.pth', _use_new_zipfile_serialization=False)
-        #     if self.master:
-        #         results = dict(imgs_masks=[], anomaly_maps=[], cls_names=[], anomalys=[])
-        #         valid_results = False
-        #         while not valid_results:
-        #             results_files = glob.glob(f'{self.tmp_dir}/*.pth')
-        #             if len(results_files) != self.cfg.world_size:
-        #                 time.sleep(1)
-        #             else:
-        #                 idx_result = 0
-        #                 while idx_result < self.cfg.world_size:
-        #                     results_file = results_files[idx_result]
-        #                     try:
-        #                         result = torch.load(results_file)
-        #                         for k, v in result.items():
-        #                             results[k].extend(v)
-        #                         idx_result += 1
-        #                     except:
-        #                         time.sleep(1)
-        #                 valid_results = True
-        # else:
-        #     results = dict(imgs_masks=imgs_masks, anomaly_maps=anomaly_maps, cls_names=cls_names, anomalys=anomalys)
+            # self.writer.add_embedding(torch.cat(glb_feats, dim=0), metadata=torch.cat(labels, dim=0), global_step=self.epoch)
+            # merge results
+            # if self.cfg.dist:
+            #     results = dict(imgs_masks=imgs_masks, anomaly_maps=anomaly_maps, cls_names=cls_names, anomalys=anomalys)
+            #     torch.save(results, f'{self.tmp_dir}/{self.rank}.pth', _use_new_zipfile_serialization=False)
+            #     if self.master:
+            #         results = dict(imgs_masks=[], anomaly_maps=[], cls_names=[], anomalys=[])
+            #         valid_results = False
+            #         while not valid_results:
+            #             results_files = glob.glob(f'{self.tmp_dir}/*.pth')
+            #             if len(results_files) != self.cfg.world_size:
+            #                 time.sleep(1)
+            #             else:
+            #                 idx_result = 0
+            #                 while idx_result < self.cfg.world_size:
+            #                     results_file = results_files[idx_result]
+            #                     try:
+            #                         result = torch.load(results_file)
+            #                         for k, v in result.items():
+            #                             results[k].extend(v)
+            #                         idx_result += 1
+            #                     except:
+            #                         time.sleep(1)
+            #                 valid_results = True
+            # else:
+            #     results = dict(imgs_masks=imgs_masks, anomaly_maps=anomaly_maps, cls_names=cls_names, anomalys=anomalys)
         if self.master:
             msg = {}
             for idx, cls_name in enumerate(self.cls_names):

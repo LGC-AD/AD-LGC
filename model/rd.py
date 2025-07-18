@@ -1,13 +1,12 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 try:
     from torch.hub import load_state_dict_from_url
 except ImportError:
     from torch.utils.model_zoo import load_url as load_state_dict_from_url
 from timm.models.resnet import Bottleneck
-
+import torch.nn.functional as F
 from model import get_model
 from model import MODEL
 
@@ -335,23 +334,99 @@ class ProjLayer(nn.Module):
         return self.proj(x)
 
 
+class SparseProjLayer(nn.Module):
+    '''
+    inputs: features of encoder block
+    outputs: projected features
+    '''
+
+    def __init__(self, in_c, out_c):
+        super(SparseProjLayer, self).__init__()
+        self.proj = nn.Sequential(
+            nn.Conv2d(in_c, in_c, kernel_size=3, stride=1, padding=1, groups=in_c),
+            nn.Conv2d(in_c, in_c // 2, kernel_size=1, stride=1),
+            nn.InstanceNorm2d(in_c // 2),
+            torch.nn.LeakyReLU(),
+
+            nn.Conv2d(in_c // 2, in_c // 2, kernel_size=3, stride=1, padding=1, groups=in_c // 2),
+            nn.Conv2d(in_c // 2, in_c // 4, kernel_size=1, stride=1),
+            nn.InstanceNorm2d(in_c // 4),
+            torch.nn.LeakyReLU(),
+
+            nn.Conv2d(in_c // 4, in_c // 4, kernel_size=3, stride=1, padding=1, groups=in_c // 4),
+            nn.Conv2d(in_c // 4, in_c // 2, kernel_size=1, stride=1),
+            nn.InstanceNorm2d(in_c // 2),
+            torch.nn.LeakyReLU(),
+
+            nn.Conv2d(in_c // 2, in_c // 2, kernel_size=3, stride=1, padding=1, groups=in_c // 2),
+            nn.Conv2d(in_c // 2, out_c, kernel_size=1, stride=1),
+            nn.InstanceNorm2d(out_c),
+            torch.nn.LeakyReLU(),
+        )
+
+    def forward(self, x):
+        return self.proj(x)
+
+
 class MultiProjectionLayer(nn.Module):
-    def __init__(self, base=64):
+    def __init__(self, base=64, dp=False):
         super(MultiProjectionLayer, self).__init__()
-        self.proj_a = ProjLayer(base * 4, base * 4)
-        self.proj_b = ProjLayer(base * 8, base * 8)
-        self.proj_c = ProjLayer(base * 16, base * 16)
+        self.proj_a = SparseProjLayer(base * 4, base * 4) if dp else ProjLayer(base * 4, base * 4)
+        self.proj_b = SparseProjLayer(base * 8, base * 8) if dp else ProjLayer(base * 8, base * 8)
+        self.proj_c = SparseProjLayer(base * 16, base * 16) if dp else ProjLayer(base * 16, base * 16)
 
-    def forward(self, features):
-        return [self.proj_a(features[0]), self.proj_b(features[1]), self.proj_c(features[2])]
+    def forward(self, features, features_noise=False):
+        if features_noise is not False:
+            return ([self.proj_a(features_noise[0]), self.proj_b(features_noise[1]), self.proj_c(features_noise[2])], \
+                    [self.proj_a(features[0]), self.proj_b(features[1]), self.proj_c(features[2])])
+        else:
+            return [self.proj_a(features[0]), self.proj_b(features[1]), self.proj_c(features[2])]
 
 
-class LGC(nn.Module):
+class RD(nn.Module):
     def __init__(self, model_t, model_s):
-        super(LGC, self).__init__()
+        super(RD, self).__init__()
         self.net_t = get_model(model_t)
         self.mff_oce = MFF_OCE(Bottleneck, 3)
-        self.proj_layer = MultiProjectionLayer(base=64)
+        self.net_s = get_model(model_s)
+
+        self.frozen_layers = ['net_t']
+
+    def freeze_layer(self, module):
+        module.eval()
+        for param in module.parameters():
+            param.requires_grad = False
+
+    def train(self, mode=True):
+        self.training = mode
+        for mname, module in self.named_children():
+            if mname in self.frozen_layers:
+                self.freeze_layer(module)
+            else:
+                module.train(mode)
+        return self
+
+    def forward(self, imgs):
+        feats_t = self.net_t(imgs)
+        feats_t = [f.detach() for f in feats_t]
+        mid = self.mff_oce(feats_t)
+        feats_s = self.net_s(mid)
+        glb_feats = F.adaptive_avg_pool2d(mid, 1).squeeze()
+        return feats_t, feats_s, glb_feats
+
+
+@MODEL.register_module
+def rd(pretrained=False, **kwargs):
+    model = RD(**kwargs)
+    return model
+
+
+class RDLGC(nn.Module):
+    def __init__(self, model_t, model_s, dp=False):
+        super(RDLGC, self).__init__()
+        self.net_t = get_model(model_t)
+        self.mff_oce = MFF_OCE(Bottleneck, 3)
+        self.proj_layer = MultiProjectionLayer(base=64, dp=dp)
         self.net_s = get_model(model_s)
         self.frozen_layers = ['net_t']
 
@@ -392,7 +467,7 @@ class LGC(nn.Module):
         glo_feats = F.adaptive_avg_pool2d(mid, 1).squeeze()
         glo_feats_k = F.adaptive_avg_pool2d(mid_k, 1).squeeze()
 
-        return feats_t, feats_s, feats_t_k, feats_t_q_grid, feats_t_k_grid, glo_feats, glo_feats_k
+        return feats_t_q, feats_s, feats_t_k, feats_t_q_grid, feats_t_k_grid, glo_feats, glo_feats_k
 
     def forward(self, imgs, aug_imgs=None):
         if self.training:
@@ -405,16 +480,17 @@ class LGC(nn.Module):
         feats_s = self.net_s(mid)
 
         glo_feats = None
+        glo_feats_k = None
         feats_t_k = None
         feats_t_q_grid = None
         feats_t_k_grid = None
 
-        return feats_t, feats_s, feats_t_k, feats_t_q_grid, feats_t_k_grid, mid, None
+        return feats_t, feats_s, feats_t_k, feats_t_q_grid, feats_t_k_grid, glo_feats, glo_feats_k
 
 
 @MODEL.register_module
-def lgc(pretrained=False, **kwargs):
-    model = LGC(**kwargs)
+def rd_lgc(pretrained=False, **kwargs):
+    model = RDLGC(**kwargs)
     return model
 
 
@@ -429,13 +505,12 @@ if __name__ == '__main__':
 
     model_t = _Namespace()
     model_t.name = 'timm_wide_resnet50_2'
-    model_t.kwargs = dict(pretrained=False, checkpoint_path='model/pretrain/wide_resnet50_racm-8234f177.pth',
-                          strict=False, features_only=True, out_indices=[1, 2, 3])
+    model_t.kwargs = dict(pretrained=True, checkpoint_path='', strict=False, features_only=True, out_indices=[1, 2, 3])
     model_s = _Namespace()
     model_s.name = 'de_wide_resnet50_2'
     model_s.kwargs = dict(pretrained=False, checkpoint_path='', strict=True)
 
-    net = LGC(model_t, model_s).cuda()
+    net = RD(model_t, model_s).cuda()
     net.eval()
     y = net(x)
 
