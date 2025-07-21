@@ -41,11 +41,11 @@ import torch.nn.functional as F
 class RDLGCTrainer(BaseTrainer):
     def __init__(self, cfg):
         super(RDLGCTrainer, self).__init__(cfg)
-        self.optim.proj_opt = get_optim(cfg.optim.proj_opt.kwargs, self.net.proj_layer, lr=cfg.optim.lr)
-        proj_layer = self.net.proj_layer
-        self.net.proj_layer = None
+        self.optim.proj_opt = get_optim(cfg.optim.proj_opt.kwargs, self.net.module.proj_layer, lr=cfg.optim.lr)
+        proj_layer = self.net.module.proj_layer
+        self.net.module.proj_layer = None
         self.optim.distill_opt = get_optim(cfg.optim.distill_opt.kwargs, self.net, lr=cfg.optim.lr * 5)
-        self.net.proj_layer = proj_layer
+        self.net.module.proj_layer = proj_layer
 
     def set_input(self, inputs):
         self.imgs = inputs['img'].cuda()
